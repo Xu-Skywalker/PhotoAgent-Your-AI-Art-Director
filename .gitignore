@@ -1,0 +1,5 @@
+# 忽略 Python 虚拟环境
+.venv/
+
+# 忽略 VS Code 的本地历史记录插件生成的文件
+.history/
