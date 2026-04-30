@@ -1,5 +1,13 @@
-# 忽略 Python 虚拟环境
+# Python virtual environments
 .venv/
 
-# 忽略 VS Code 的本地历史记录插件生成的文件
+# Python runtime caches
+__pycache__/
+*.py[cod]
+
+# VS Code local history
 .history/
+
+# Local runtime outputs
+data/results/
+.uv-cache/

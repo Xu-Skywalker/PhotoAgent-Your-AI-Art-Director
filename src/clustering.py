@@ -1,92 +1,107 @@
-import os
+"""Clustering layer: group similar burst photos with DBSCAN on cosine distance."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
 import numpy as np
 from sklearn.cluster import DBSCAN
 from sklearn.metrics.pairwise import cosine_distances
 
+from src import config
+
 
 class ImageClusterer:
-    def __init__(self, eps=0.05, min_samples=2):
-        """
-        初始化聚类模块
-        :param eps: 邻域半径（核心参数）。
-                    值越小，要求照片越像才能分到一组。
-                    经验值：0.05 ~ 0.1 适合找连拍；0.2 ~ 0.3 适合找同一场景。
-        :param min_samples: 最少几张照片才能构成一个“组”。
-        """
+    def __init__(
+        self,
+        eps: float = config.DBSCAN_EPS,
+        min_samples: int = config.DBSCAN_MIN_SAMPLES,
+        expected_dim: int = config.FEATURE_DIM,
+    ) -> None:
         self.eps = eps
         self.min_samples = min_samples
-        print(f"初始化聚类模块 (阈值 eps={eps}, 最小成组数={min_samples})...")
+        self.expected_dim = expected_dim
+        print(
+            f"📦 初始化聚类层: DBSCAN eps={eps}, min_samples={min_samples}, "
+            f"metric=precomputed"
+        )
 
-    def load_features(self, cache_dir):
-        """
-        从硬盘读取提取好的 .npy 特征
-        """
-        feature_list = []
-        filename_list = []
+    def load_features(self, cache_dir: str | Path) -> tuple[np.ndarray | None, list[str]]:
+        cache_path = Path(cache_dir)
+        if not cache_path.exists():
+            print(f"🔴 特征缓存目录不存在: {cache_path}")
+            return None, []
 
-        if not os.path.exists(cache_dir):
-            print(f"找不到缓存目录: {cache_dir}")
-            return None, None
+        feature_list: list[np.ndarray] = []
+        filename_list: list[str] = []
+        skipped = 0
 
-        # 扫描缓存文件夹
-        for file in os.listdir(cache_dir):
-            if file.endswith(".npy"):
-                try:
-                    # 加载向量并确保维度正确 (512,)
-                    feat = np.load(os.path.join(cache_dir, file)).flatten()
-                    feature_list.append(feat)
-                    # 记录对应的原图名（去除 .npy 后缀）
-                    filename_list.append(file.replace(".npy", ""))
-                except Exception as e:
-                    print(f"读取 {file} 失败: {e}")
+        for file_path in sorted(cache_path.glob("*.npy")):
+            try:
+                vector = np.load(file_path).astype(np.float32).reshape(-1)
+                if vector.size != self.expected_dim:
+                    skipped += 1
+                    print(
+                        f"🟡 跳过维度异常的特征: {file_path.name} "
+                        f"({vector.size} != {self.expected_dim})"
+                    )
+                    continue
+                if not np.isfinite(vector).all():
+                    skipped += 1
+                    print(f"🟡 跳过包含 NaN/Inf 的特征: {file_path.name}")
+                    continue
+                feature_list.append(vector)
+                filename_list.append(file_path.stem)
+            except Exception as exc:
+                skipped += 1
+                print(f"🔴 读取特征失败: {file_path.name} -> {exc}")
 
         if not feature_list:
-            print("缓存目录为空，请先运行 perception.py 提取特征。")
-            return None, None
+            print("🟡 缓存目录中没有可用特征，请先运行 perception.py")
+            return None, []
 
-        return np.array(feature_list), filename_list
+        if skipped:
+            print(f"🟡 已跳过 {skipped} 个不可用特征文件")
 
-    def run(self, cache_dir):
-        """
-        执行聚类流程
-        """
+        features = np.vstack(feature_list).astype(np.float32)
+        return features, filename_list
+
+    def run(self, cache_dir: str | Path) -> dict[int, list[str]]:
         features, filenames = self.load_features(cache_dir)
-        if features is None:
+        if features is None or len(filenames) < self.min_samples:
+            print("🟡 可聚类照片数量不足")
             return {}
 
-        print(f"正在对 {len(filenames)} 张照片进行空间距离计算...")
+        print(f"🧮 正在为 {len(filenames)} 张照片计算余弦距离矩阵")
+        dist_matrix = cosine_distances(features).astype(np.float32)
+        dist_matrix = np.clip(dist_matrix, 0.0, 2.0)
 
-        # 1. 计算余弦距离矩阵 (1 - 余弦相似度)
-        # 距离越接近 0，表示照片越相似
-        dist_matrix = cosine_distances(features)
+        dbscan = DBSCAN(
+            eps=self.eps,
+            min_samples=self.min_samples,
+            metric="precomputed",
+        )
+        labels = dbscan.fit_predict(dist_matrix)
 
-        # 2. 运行 DBSCAN 算法
-        # metric='precomputed' 表示我们已经自己算好距离矩阵了
-        db = DBSCAN(eps=self.eps, min_samples=self.min_samples, metric="precomputed")
-        labels = db.fit_predict(dist_matrix)
-
-        # 3. 整理结果
-        groups = {}
+        groups: dict[int, list[str]] = {}
+        noise_count = 0
         for idx, label in enumerate(labels):
             if label == -1:
-                # -1 代表噪声点，即没有相似照片的独立图，我们暂时跳过
+                noise_count += 1
                 continue
+            groups.setdefault(int(label), []).append(filenames[idx])
 
-            if label not in groups:
-                groups[label] = []
-            groups[label].append(filenames[idx])
-
-        print(f"聚类完成！共发现 {len(groups)} 个相似连拍组。")
+        print(
+            f"✅ 聚类完成: 发现 {len(groups)} 个连拍组，"
+            f"剔除独立照片 {noise_count} 张"
+        )
+        for group_id, photos in groups.items():
+            print(f"  🧺 组 {group_id}: {len(photos)} 张 -> {photos}")
         return groups
 
 
 if __name__ == "__main__":
-    # 单独测试逻辑
-    CACHE_DIR = "data/cache"
-    # 如果你发现连拍的照片没被分到一起，就调大 eps（如 0.08）
-    # 如果你发现完全不同的照片被误分到一起，就调小 eps（如 0.03）
-    clusterer = ImageClusterer(eps=0.2)
-    groups = clusterer.run(CACHE_DIR)
-
-    for gid, photos in groups.items():
-        print(f"组 {gid}: {photos}")
+    config.ensure_project_dirs()
+    clusterer = ImageClusterer()
+    found_groups = clusterer.run(config.CACHE_DIR)
+    print(found_groups)

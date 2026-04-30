@@ -1,119 +1,161 @@
+"""Perception layer: extract CLIP visual features and cache them as .npy files."""
+
+from __future__ import annotations
+
 import os
-import torch
+from pathlib import Path
+
 import numpy as np
-from PIL import Image
-from transformers import CLIPProcessor, CLIPModel
+import torch
+from PIL import Image, ImageOps
 from tqdm import tqdm
+from transformers import CLIPModel, CLIPProcessor
+
+from src import config
 
 
 class ImagePerceiver:
-    def __init__(self, model_id="openai/clip-vit-large-patch14"):
-        """
-        初始化感知层：负责将图片转化为 768 维的数学特征向量
-        """
-        print(f"正在初始化感知模块，加载模型: {model_id} ...")
+    """Extract 768-dim CLIP visual embeddings with the vision tower only."""
 
-        # 自动检测你的 RTX 4060 显卡
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+    def __init__(self, model_id: str = config.CLIP_MODEL_ID) -> None:
+        self.model_id = model_id
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.dtype = torch.float16 if self.device.type == "cuda" else torch.float32
+        self.model: CLIPModel | None = None
+        self.processor: CLIPProcessor | None = None
 
-        # 针对 40系 显卡的终极优化：开启 FP16 半精度
-        dtype = torch.float16 if self.device == "cuda" else torch.float32
+        print(f"🧬 初始化感知层: model={model_id}")
+        if self.device.type == "cuda":
+            gpu_name = torch.cuda.get_device_name(0)
+            print(f"⚡ 检测到 CUDA: {gpu_name}，需要提取新特征时会启用 FP16")
+        else:
+            print("🟡 未检测到 CUDA，将使用 CPU + FP32 推理，速度会明显变慢")
+        print("✅ 感知层就绪，模型将按需懒加载")
 
-        # 加载 CLIP 模型和图像预处理器
-        self.model = CLIPModel.from_pretrained(
-            model_id, torch_dtype=dtype, use_safetensors=True
-        ).to(self.device)
-        self.processor = CLIPProcessor.from_pretrained(model_id)
-
-        # 切换到评估模式 (极其重要：关闭训练引擎，节省极大的显存和算力)
-        self.model.eval()
-        print(f"模型加载完毕！当前运行设备: {self.device.upper()} (精度: {dtype})")
-
-    def extract_and_save_features(self, input_dir, cache_dir):
-        """
-        核心工作流：扫描图片 -> 提取特征 -> 保存为 .npy 硬盘文件
-        """
-        # 确保输出的缓存目录存在，如果不存在则自动创建
-        os.makedirs(cache_dir, exist_ok=True)
-
-        # 定义支持的图片格式
-        valid_extensions = (".png", ".jpg", ".jpeg", ".webp")
-
-        # 扫描文件夹里的所有图片文件
-        image_files = [
-            f for f in os.listdir(input_dir) if f.lower().endswith(valid_extensions)
-        ]
-
-        if not image_files:
-            print(f"在目录 '{input_dir}' 中没有找到任何图片。")
+    def _load_model(self) -> None:
+        if self.model is not None and self.processor is not None:
             return
 
-        print(f"发现 {len(image_files)} 张图片，开始提取特征向量...")
+        print(f"🧠 正在加载 CLIP 视觉模型: {self.model_id}")
+        if self.device.type == "cuda":
+            torch.backends.cudnn.benchmark = True
+        self.model = CLIPModel.from_pretrained(
+            self.model_id,
+            torch_dtype=self.dtype,
+            use_safetensors=True,
+        ).to(self.device)
+        self.processor = CLIPProcessor.from_pretrained(self.model_id)
+        self.model.eval()
 
-        # 记录成功提取的数量
-        success_count = 0
+        projection_dim = int(getattr(self.model.config, "projection_dim", 0) or 0)
+        if projection_dim != config.FEATURE_DIM:
+            print(
+                f"🟡 当前模型 projection_dim={projection_dim}，"
+                f"配置期望={config.FEATURE_DIM}，后续会按实际输出校验。"
+            )
+        print(f"✅ 模型加载完成: device={self.device}, dtype={self.dtype}")
 
-        # tqdm 会在控制台为你画出一个非常漂亮的进度条
-        for filename in tqdm(image_files, desc="处理进度", unit="张"):
-            image_path = os.path.join(input_dir, filename)
+    @staticmethod
+    def _iter_images(input_dir: Path) -> list[Path]:
+        if not input_dir.exists():
+            print(f"🔴 原图目录不存在: {input_dir}")
+            return []
+        return sorted(
+            path
+            for path in input_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in config.IMAGE_EXTENSIONS
+        )
 
-            # 构造 .npy 文件的保存路径 (例如: DSC_001.jpg -> DSC_001.npy)
-            base_name = os.path.splitext(filename)[0]
-            cache_path = os.path.join(cache_dir, f"{base_name}.npy")
+    @staticmethod
+    def _is_valid_cache(cache_path: Path, expected_dim: int = config.FEATURE_DIM) -> bool:
+        if not cache_path.exists() or cache_path.stat().st_size == 0:
+            return False
+        try:
+            vector = np.load(cache_path)
+        except Exception:
+            return False
+        return vector.size == expected_dim and np.isfinite(vector).all()
 
-            # 【防抖设计】：如果特征已经存在，直接跳过，支持随时中断和恢复
-            if os.path.exists(cache_path):
-                success_count += 1
+    def _extract_one(self, image_path: Path) -> np.ndarray:
+        self._load_model()
+        assert self.model is not None
+        assert self.processor is not None
+
+        with Image.open(image_path) as image:
+            image = ImageOps.exif_transpose(image).convert("RGB")
+            inputs = self.processor(images=image, return_tensors="pt")
+
+        pixel_values = inputs["pixel_values"].to(self.device, dtype=self.dtype)
+
+        with torch.inference_mode():
+            # 关键路径：只调用 CLIP 视觉塔，再通过 visual_projection 得到 768 维图像特征。
+            vision_outputs = self.model.vision_model(pixel_values=pixel_values)
+            pooled_output = vision_outputs.pooler_output
+            features = self.model.visual_projection(pooled_output)
+            features = features / features.norm(p=2, dim=-1, keepdim=True).clamp_min(1e-12)
+
+        vector = features.squeeze(0).detach().cpu().numpy().astype(np.float32)
+        if vector.size != config.FEATURE_DIM:
+            raise ValueError(f"特征维度异常: got={vector.size}, expected={config.FEATURE_DIM}")
+        return vector
+
+    @staticmethod
+    def _atomic_save(cache_path: Path, vector: np.ndarray) -> None:
+        tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+        with tmp_path.open("wb") as handle:
+            np.save(handle, vector)
+        os.replace(tmp_path, cache_path)
+
+    def extract_and_save_features(
+        self,
+        input_dir: str | Path,
+        cache_dir: str | Path,
+        force: bool = False,
+    ) -> dict[str, int]:
+        """Scan images, extract features, and persist one [photo_stem].npy per image."""
+        input_path = Path(input_dir)
+        cache_path = Path(cache_dir)
+        cache_path.mkdir(parents=True, exist_ok=True)
+
+        image_files = self._iter_images(input_path)
+        if not image_files:
+            print(f"🟡 在目录 {input_path} 中没有找到可处理图片")
+            return {"total": 0, "processed": 0, "skipped": 0, "failed": 0}
+
+        processed = 0
+        skipped = 0
+        failed = 0
+        print(f"📸 发现 {len(image_files)} 张图片，开始提取 768 维视觉特征")
+
+        for image_path in tqdm(image_files, desc="🧬 感知进度", unit="张"):
+            output_path = cache_path / f"{image_path.stem}.npy"
+
+            if not force and self._is_valid_cache(output_path):
+                skipped += 1
                 continue
 
             try:
-                # 1. 读取图片并转化为 RGB 格式
-                image = Image.open(image_path).convert("RGB")
-
-                # 2. 预处理图片并推入显卡
-                inputs = self.processor(images=image, return_tensors="pt").to(
-                    self.device
-                )
-
-                # 3. 提取特征 (使用 torch.no_grad() 彻底切断反向传播，保护显存)
-                with torch.no_grad():
-                    # 第一步：绕过多模态总闸，直接只调用“视觉子模型”
-                    vision_outputs = self.model.vision_model(
-                        pixel_values=inputs["pixel_values"]
-                    )
-
-                    # 第二步：从大礼包对象中，强行拿出池化后的纯数学张量
-                    pooled_output = vision_outputs.pooler_output
-
-                    # 第三步：将其穿过投影层，精准降维到 CLIP 标准的 512 维特征
-                    features = self.model.visual_projection(pooled_output)
-
-                # 4. L2 归一化 (将向量长度压缩为1，这是后续计算余弦相似度的前提)
-                features = features / features.norm(p=2, dim=-1, keepdim=True)
-
-                # 5. 从显卡抓回内存，转换为普通浮点数 Numpy 数组并保存落盘
-                feature_array = features.cpu().numpy().astype(np.float32)
-                np.save(cache_path, feature_array)
-
-                success_count += 1
-
-            except Exception as e:
-                print(f"\n处理图片 {filename} 时发生错误: {e}")
+                vector = self._extract_one(image_path)
+                self._atomic_save(output_path, vector)
+                processed += 1
+            except Exception as exc:
+                failed += 1
+                print(f"\n🔴 处理失败: {image_path.name} -> {exc}")
+                if self.device.type == "cuda":
+                    torch.cuda.empty_cache()
 
         print(
-            f"\n提取完成！成功处理: {success_count}/{len(image_files)} 张图片。特征已存入 {cache_dir}"
+            f"✅ 感知层完成: 新处理 {processed} 张，跳过缓存 {skipped} 张，失败 {failed} 张"
         )
+        return {
+            "total": len(image_files),
+            "processed": processed,
+            "skipped": skipped,
+            "failed": failed,
+        }
 
 
-# ================= 用于本地单独测试的入口 =================
 if __name__ == "__main__":
-    # 这里的路径是相对于你运行终端的目录 (项目根目录)
-    # 确保你已经在 data/raw_photos 里放了几张测试照片
-    RAW_PHOTOS_DIR = "data/raw_photos"
-    CACHE_DIR = "data/cache"
-
-    # 实例化感知器
+    config.ensure_project_dirs()
     perceiver = ImagePerceiver()
-
-    # 执行提取任务
-    perceiver.extract_and_save_features(RAW_PHOTOS_DIR, CACHE_DIR)
+    perceiver.extract_and_save_features(config.RAW_PHOTOS_DIR, config.CACHE_DIR)

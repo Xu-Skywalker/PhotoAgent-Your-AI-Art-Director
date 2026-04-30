@@ -1,7 +1,16 @@
 [project]
 name = "photo-agent"
 version = "0.1.0"
-description = "Add your description here"
+description = "Local intelligent photography selection agent."
 readme = "README.md"
-requires-python = ">=3.12"
-dependencies = []
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "openai>=1.0",
+    "pillow>=10.0",
+    "safetensors>=0.4",
+    "scikit-learn>=1.3",
+    "torch>=2.1",
+    "tqdm>=4.66",
+    "transformers>=4.40",
+]
