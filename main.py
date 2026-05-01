@@ -12,10 +12,12 @@ from src import config
 from src.clustering import ImageClusterer
 from src.llm_judge import LLMJudge
 from src.perception import ImagePerceiver
-from src.scorer import AestheticScorer
+from scorer import AestheticScorer
 
 
-def _find_photo_path(photo_id: str, raw_dir: Path = config.RAW_PHOTOS_DIR) -> Path | None:
+def _find_photo_path(
+    photo_id: str, raw_dir: Path = config.RAW_PHOTOS_DIR
+) -> Path | None:
     for suffix in config.IMAGE_EXTENSIONS:
         candidate = raw_dir / f"{photo_id}{suffix}"
         if candidate.exists():
@@ -38,7 +40,9 @@ def _write_results(payload: dict[str, Any]) -> Path:
     return output_path
 
 
-def run_pipeline(skip_llm: bool = False, top_n: int = config.SCORER_TOP_N) -> dict[str, Any]:
+def run_pipeline(
+    skip_llm: bool = False, top_n: int = config.SCORER_TOP_N
+) -> dict[str, Any]:
     print("\n🚀 本地智能摄影选片 Agent 启动")
     print(f"📁 原图目录: {config.RAW_PHOTOS_DIR}")
     print(f"🧠 特征缓存: {config.CACHE_DIR}\n")
@@ -82,10 +86,7 @@ def run_pipeline(skip_llm: bool = False, top_n: int = config.SCORER_TOP_N) -> di
     print("\n========== [阶段四] 决策层 / 多模态终审 ==========")
     llm_decisions: dict[str, Any] = {}
     should_call_llm = (
-        not skip_llm
-        and config.LLM_API_KEY
-        and config.LLM_BASE_URL
-        and config.LLM_MODEL
+        not skip_llm and config.LLM_API_KEY and config.LLM_BASE_URL and config.LLM_MODEL
     )
 
     if not should_call_llm:

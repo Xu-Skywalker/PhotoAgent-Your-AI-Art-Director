@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import io
+from PIL import Image
 import json
 import mimetypes
 from pathlib import Path
@@ -34,9 +36,21 @@ class LLMJudge:
 
     @staticmethod
     def _image_to_data_url(image_path: Path) -> str:
-        mime_type = mimetypes.guess_type(image_path.name)[0] or "image/jpeg"
-        encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
-        return f"data:{mime_type};base64,{encoded}"
+        """读取图片，压缩瘦身后再转成 base64 Data URL，防止触发 413 报错"""
+        with Image.open(image_path) as img:
+            # 1. 转换为通用的 RGB 模式（丢弃可能存在的透明通道）
+            img = img.convert("RGB")
+
+            # 2. 等比例缩小：限制最大边长为 1024 像素（大模型看图完全够用了）
+            img.thumbnail((1024, 1024))
+
+            # 3. 将压缩后的图片存入内存缓冲区
+            buffer = io.BytesIO()
+            img.save(buffer, format="JPEG", quality=85)  # 使用 85% 质量的 JPEG 压缩
+
+            # 4. 转换为 base64 字符串并拼接成标准协议头
+            encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+            return f"data:image/jpeg;base64,{encoded}"
 
     @staticmethod
     def _parse_json(content: str) -> dict[str, Any]:
@@ -83,7 +97,9 @@ class LLMJudge:
 
         reference_path = Path(reference_image_path) if reference_image_path else None
         if reference_path and reference_path.exists():
-            content.append({"type": "text", "text": "以下是大师参考图，用于校准审美标准。"})
+            content.append(
+                {"type": "text", "text": "以下是大师参考图，用于校准审美标准。"}
+            )
             content.append(
                 {
                     "type": "image_url",
@@ -92,7 +108,9 @@ class LLMJudge:
             )
 
         for index, image_path in enumerate(candidate_files):
-            content.append({"type": "text", "text": f"候选图 index={index}: {image_path.name}"})
+            content.append(
+                {"type": "text", "text": f"候选图 index={index}: {image_path.name}"}
+            )
             content.append(
                 {
                     "type": "image_url",
@@ -119,9 +137,7 @@ class LLMJudge:
             raw_content = response.choices[0].message.content or "{}"
             parsed = self._parse_json(raw_content)
             parsed["candidate_files"] = [path.name for path in candidate_files]
-            print(
-                f"🎩 LLM 终审完成: best_photo_index={parsed.get('best_photo_index')}"
-            )
+            print(f"🎩 LLM 终审完成: best_photo_index={parsed.get('best_photo_index')}")
             return parsed
         except Exception as exc:
             print(f"🔴 LLM 终审失败，沿用本地评分第一名: {exc}")

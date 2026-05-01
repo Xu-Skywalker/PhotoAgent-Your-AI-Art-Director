@@ -5,6 +5,9 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 def configure_console_encoding() -> None:
@@ -12,7 +15,7 @@ def configure_console_encoding() -> None:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             try:
-                stream.reconfigure(encoding="utf-8", errors="replace")
+                stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore
             except Exception:
                 pass
 
@@ -23,6 +26,11 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT_DIR / "data"
 RAW_PHOTOS_DIR = DATA_DIR / "raw_photos"
 CACHE_DIR = DATA_DIR / "cache"
+
+# 👇 新增：大师图库的专属目录
+MASTER_PHOTOS_DIR = Path(r"D:\masterpiece\master1")  # 存放你找来的几万张大师原图
+MASTER_CACHE_DIR = DATA_DIR / "master_cache"  # 存放大师图提取出来的 768维基因库
+
 RESULTS_DIR = DATA_DIR / "results"
 MODELS_DIR = ROOT_DIR / "models"
 
@@ -54,7 +62,14 @@ MASTER_REFERENCE_IMAGE = Path(
 
 def ensure_project_dirs() -> None:
     """Create project directories that are safe for the app to own."""
-    for path in (RAW_PHOTOS_DIR, CACHE_DIR, RESULTS_DIR, MODELS_DIR):
+    for path in (
+        RAW_PHOTOS_DIR,
+        CACHE_DIR,
+        RESULTS_DIR,
+        MODELS_DIR,
+        MASTER_PHOTOS_DIR,
+        MASTER_CACHE_DIR,
+    ):
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -66,3 +81,5 @@ if __name__ == "__main__":
     print(f"🧠 CACHE_DIR: {CACHE_DIR}")
     print(f"🎯 CLIP_MODEL_ID: {CLIP_MODEL_ID}")
     print(f"📐 FEATURE_DIM: {FEATURE_DIM}")
+    print(f"🎨 MASTER_PHOTOS_DIR: {MASTER_PHOTOS_DIR}")
+    print(f"🧬 MASTER_CACHE_DIR: {MASTER_CACHE_DIR}")

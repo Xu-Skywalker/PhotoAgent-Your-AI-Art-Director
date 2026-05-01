@@ -43,7 +43,7 @@ class ImagePerceiver:
             self.model_id,
             torch_dtype=self.dtype,
             use_safetensors=True,
-        ).to(self.device)
+        ).to(self.device)  # type: ignore
         self.processor = CLIPProcessor.from_pretrained(self.model_id)
         self.model.eval()
 
@@ -60,14 +60,18 @@ class ImagePerceiver:
         if not input_dir.exists():
             print(f"🔴 原图目录不存在: {input_dir}")
             return []
+
+        # 使用 rglob("*") 递归搜索，无论图片藏在多少层子文件夹里都能揪出来！
         return sorted(
             path
-            for path in input_dir.iterdir()
+            for path in input_dir.rglob("*")
             if path.is_file() and path.suffix.lower() in config.IMAGE_EXTENSIONS
         )
 
     @staticmethod
-    def _is_valid_cache(cache_path: Path, expected_dim: int = config.FEATURE_DIM) -> bool:
+    def _is_valid_cache(
+        cache_path: Path, expected_dim: int = config.FEATURE_DIM
+    ) -> bool:
         if not cache_path.exists() or cache_path.stat().st_size == 0:
             return False
         try:
@@ -83,7 +87,7 @@ class ImagePerceiver:
 
         with Image.open(image_path) as image:
             image = ImageOps.exif_transpose(image).convert("RGB")
-            inputs = self.processor(images=image, return_tensors="pt")
+            inputs = self.processor(images=image, return_tensors="pt")  # type: ignore
 
         pixel_values = inputs["pixel_values"].to(self.device, dtype=self.dtype)
 
@@ -92,11 +96,15 @@ class ImagePerceiver:
             vision_outputs = self.model.vision_model(pixel_values=pixel_values)
             pooled_output = vision_outputs.pooler_output
             features = self.model.visual_projection(pooled_output)
-            features = features / features.norm(p=2, dim=-1, keepdim=True).clamp_min(1e-12)
+            features = features / features.norm(p=2, dim=-1, keepdim=True).clamp_min(
+                1e-12
+            )
 
         vector = features.squeeze(0).detach().cpu().numpy().astype(np.float32)
         if vector.size != config.FEATURE_DIM:
-            raise ValueError(f"特征维度异常: got={vector.size}, expected={config.FEATURE_DIM}")
+            raise ValueError(
+                f"特征维度异常: got={vector.size}, expected={config.FEATURE_DIM}"
+            )
         return vector
 
     @staticmethod
