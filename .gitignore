@@ -11,3 +11,5 @@ __pycache__/
 # Local runtime outputs
 data/results/
 .uv-cache/
+
+.env/
