@@ -28,6 +28,6 @@ graph TD
     B --> C[Planning: DBSCAN Clustering and Centroid Filtering]
     C --> D{High Quality?}
     D -- No --> E[Trash Bin]
-    D -- Yes --> F[Action: Dynamic Compression & Pre-processing]
+    D -- Yes --> F[Action: Dynamic Compression and Pre-processing]
     F --> G[Reasoning: Vision LLM Multi-image Judge]
     G --> H[Final Masterpieces and Aesthetic Report]
